@@ -12,7 +12,7 @@ import random
 st.title("Saudi Arabia EEZ Satellite Coverage Map")
 
 # Define base directory for files
-base_dir = r'C:\Users\ghara\Projects\pre-post_processing\maps\KSA-Calendar'
+base_dir = r'.'
 
 # Define satellite configurations (file path and revisit frequency in days)
 satellite_configs = [
