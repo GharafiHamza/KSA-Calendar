@@ -190,6 +190,19 @@ m = folium.Map(location=[22.45276, 40.48313], zoom_start=6)
 # Dictionary to store colors for daily satellites
 daily_satellite_colors = {}
 
+# Add CSS to force white borders
+st.markdown(
+    """
+    <style>
+    .leaflet-overlay-pane path {
+        stroke: white !important;
+        stroke-width: 2;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 # Add Sentinel polygons
 if sentinel_data is not None:
     modified_aoi = aoi_data.copy()  # Initialize here to avoid reinitialization
@@ -216,7 +229,7 @@ if sentinel_data is not None:
                     row['geometry'],
                     style_function=lambda x, color=colors[satellite]: {
                         'fillColor': color,
-                        'color': color,
+                        'color': 'white',  # White border
                         'weight': 2,
                         'fillOpacity': 0.5
                     },
@@ -248,7 +261,7 @@ if landsat_data is not None and selected_date.month == 8:
                     row['geometry'],
                     style_function=lambda x, sat=row['satellite']: {
                         'fillColor': colors[sat],
-                        'color': colors[sat],
+                        'color': 'white',  # White border
                         'weight': 2,
                         'fillOpacity': 0.5
                     },
@@ -299,7 +312,7 @@ if daily_data is not None:
                     row['geometry'],
                     style_function=lambda x, color=daily_satellite_colors.get(satellite, colors.get(satellite, 'gray')): {
                         'fillColor': color,
-                        'color': color,
+                        'color': 'white',  # White border
                         'weight': 2,
                         'fillOpacity': 0.5
                     },
@@ -318,7 +331,7 @@ for _, row in modified_aoi.iterrows():
             row['geometry'],
             style_function=lambda x: {
                 'fillColor': 'yellow',
-                'color': 'black',
+                'color': 'white',  # White border
                 'weight': 2,
                 'fillOpacity': 0.3
             },
@@ -357,6 +370,10 @@ else:
 #         justify-content: center;
 #         flex-direction: column;
 #         align-items: center;
+#     }
+#     .leaflet-overlay-pane path {
+#         stroke: white !important;
+#         stroke-width: 2;
 #     }
 #     </style>
 #     """,
