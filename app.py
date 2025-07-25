@@ -6,6 +6,7 @@ from streamlit_folium import folium_static
 import os
 from datetime import datetime, timedelta
 import shapely
+from shapely.ops import unary_union
 import random
 
 # Add a title for better UI
@@ -16,11 +17,11 @@ base_dir = r'.'
 
 # Define satellite configurations (file path and revisit frequency in days)
 satellite_configs = [
-    {'file': os.path.join(base_dir, 'S1A_12day_reference_coverage_plan.geojson'), 'name': 'Sentinel-1A', 'revisit_frequency': 12},
-    {'file': os.path.join(base_dir, 'S1C_12day_reference_coverage_plan.geojson'), 'name': 'Sentinel-1C', 'revisit_frequency': 12},
-    {'file': os.path.join(base_dir, 'S2A_10day_reference_coverage_plan.geojson'), 'name': 'Sentinel-2A', 'revisit_frequency': 10},
-    {'file': os.path.join(base_dir, 'S2B_10day_reference_coverage_plan.geojson'), 'name': 'Sentinel-2B', 'revisit_frequency': 10},
-    {'file': os.path.join(base_dir, 'S2C_10day_reference_coverage_plan.geojson'), 'name': 'Sentinel-2C', 'revisit_frequency': 10},
+    {'file': os.path.join(base_dir, 'S1A_intersected_aoi.geojson'), 'name': 'Sentinel-1A', 'revisit_frequency': 12},
+    {'file': os.path.join(base_dir, 'S1C_intersected_aoi.geojson'), 'name': 'Sentinel-1C', 'revisit_frequency': 12},
+    {'file': os.path.join(base_dir, 'S2A_intersected_aoi.geojson'), 'name': 'Sentinel-2A', 'revisit_frequency': 10},
+    {'file': os.path.join(base_dir, 'S2B_intersected_aoi.geojson'), 'name': 'Sentinel-2B', 'revisit_frequency': 10},
+    {'file': os.path.join(base_dir, 'S2C_intersected_aoi.geojson'), 'name': 'Sentinel-2C', 'revisit_frequency': 10},
 ]
 
 # AOI and Landsat files
@@ -58,7 +59,7 @@ def get_random_color():
 # Load daily GeoJSON files (e.g., august_01.geojson)
 def load_daily_satellite_data(selected_date, base_dir):
     date_str = selected_date.strftime('%d')
-    daily_file = os.path.join(base_dir, 'KSA_comercial_coverage', f'august_{date_str}.geojson')
+    daily_file = os.path.join(base_dir, 'KSA_commercial_coverage', f'august_{date_str}.geojson')
     if os.path.exists(daily_file):
         try:
             gdf = gpd.read_file(daily_file, engine='pyogrio')
@@ -190,18 +191,10 @@ m = folium.Map(location=[22.45276, 40.48313], zoom_start=6)
 # Dictionary to store colors for daily satellites
 daily_satellite_colors = {}
 
-# Add CSS to force white borders
-st.markdown(
-    """
-    <style>
-    .leaflet-overlay-pane path {
-        stroke: white !important;
-        stroke-width: 2;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+# Lists to store table data and frame counts
+table_data = []
+free_frames = []
+commercial_frames = []
 
 # Add Sentinel polygons
 if sentinel_data is not None:
@@ -221,21 +214,39 @@ if sentinel_data is not None:
                 sat_union = filtered_data.geometry.unary_union
                 modified_aoi['geometry'] = modified_aoi['geometry'].difference(sat_union)
                 modified_aoi['geometry'] = modified_aoi['geometry'].apply(lambda geom: shapely.make_valid(geom) if not geom.is_valid else geom)
+                # Collect free frames
+                free_frames.extend(filtered_data.geometry.tolist())
             except Exception as e:
                 st.warning(f"Error computing union for {satellite} on {target_date}: {str(e)}")
+        frame_count = len(filtered_data)
+        sensor = sat_data.get('Instrument', 'C-SAR' if 'Sentinel-1' in satellite else 'MSI').iloc[0] if 'Instrument' in sat_data.columns else ('C-SAR' if 'Sentinel-1' in satellite else 'MSI')
         for _, row in filtered_data.iterrows():
             if row['geometry'].is_valid and not row['geometry'].is_empty:
+                # Calculate area covered by this frame
+                intersection = aoi_data.geometry.intersection(row['geometry'])
+                intersection = intersection.apply(lambda geom: shapely.make_valid(geom) if not geom.is_valid else geom)
+                area_covered = intersection.to_crs(epsg=32637).geometry.area.sum() / 1_000_000  # km²
+                percentage_covered = (area_covered / original_area) * 100 if original_area > 0 else 0.0
+                timestamp = f"{row['begin']} to {row['end']}" if pd.notna(row.get('begin')) and pd.notna(row.get('end')) else 'Unknown'
+                table_data.append({
+                    'Satellite': satellite,
+                    'Number of Frames': frame_count,
+                    'Timestamp': timestamp,
+                    'Sensor': sensor,
+                    'Area Covered (km²)': round(area_covered, 2),
+                    'Percentage Covered (%)': round(percentage_covered, 2)
+                })
                 folium.GeoJson(
                     row['geometry'],
                     style_function=lambda x, color=colors[satellite]: {
                         'fillColor': color,
-                        'color': 'white',  # White border
+                        'color': 'white',  # Border matches fill for Sentinel
                         'weight': 2,
                         'fillOpacity': 0.5
                     },
                     popup=folium.Popup(
                         f"{satellite}<br>Date: {row['acquisition_date'].strftime('%Y-%m-%d')}<br>"
-                        f"Time: {row['begin']} to {row['end']}"
+                        f"Time: {timestamp}"
                     )
                 ).add_to(feature_group)
         feature_group.add_to(m)
@@ -253,15 +264,33 @@ if landsat_data is not None and selected_date.month == 8:
                 landsat_union = filtered_landsat.geometry.unary_union
                 modified_aoi['geometry'] = modified_aoi['geometry'].difference(landsat_union)
                 modified_aoi['geometry'] = modified_aoi['geometry'].apply(lambda geom: shapely.make_valid(geom) if not geom.is_valid else geom)
+                # Collect free frames
+                free_frames.extend(filtered_landsat.geometry.tolist())
             except Exception as e:
                 st.warning(f"Error computing union for Landsat on {selected_date}: {str(e)}")
+        frame_count = len(filtered_landsat)
         for _, row in filtered_landsat.iterrows():
             if row['geometry'].is_valid and not row['geometry'].is_empty:
+                # Calculate area covered by this frame
+                intersection = aoi_data.geometry.intersection(row['geometry'])
+                intersection = intersection.apply(lambda geom: shapely.make_valid(geom) if not geom.is_valid else geom)
+                area_covered = intersection.to_crs(epsg=32637).geometry.area.sum() / 1_000_000  # km²
+                percentage_covered = (area_covered / original_area) * 100 if original_area > 0 else 0.0
+                timestamp = row['acquisition_date'].strftime('%H:%M:%S') if pd.notna(row['acquisition_date']) else 'Unknown'
+                sensor = row.get('Instrument', 'OLI/TIRS') if 'Instrument' in row else 'OLI/TIRS'
+                table_data.append({
+                    'Satellite': row['satellite'],
+                    'Number of Frames': frame_count,
+                    'Timestamp': timestamp,
+                    'Sensor': sensor,
+                    'Area Covered (km²)': round(area_covered, 2),
+                    'Percentage Covered (%)': round(percentage_covered, 2)
+                })
                 folium.GeoJson(
                     row['geometry'],
                     style_function=lambda x, sat=row['satellite']: {
                         'fillColor': colors[sat],
-                        'color': 'white',  # White border
+                        'color': 'white',  # White border for Landsat
                         'weight': 2,
                         'fillOpacity': 0.5
                     },
@@ -285,8 +314,12 @@ if daily_data is not None:
                 sat_union = filtered_data.geometry.unary_union
                 modified_aoi['geometry'] = modified_aoi['geometry'].difference(sat_union)
                 modified_aoi['geometry'] = modified_aoi['geometry'].apply(lambda geom: shapely.make_valid(geom) if not geom.is_valid else geom)
+                # Collect commercial frames
+                commercial_frames.extend(filtered_data.geometry.tolist())
             except Exception as e:
                 st.warning(f"Error computing union for {satellite} on {selected_date}: {str(e)}")
+        frame_count = len(filtered_data)
+        sensor = sat_data.get('Sensor', 'Unknown').iloc[0] if 'Sensor' in sat_data.columns else 'Unknown'
         for _, row in filtered_data.iterrows():
             if row['geometry'].is_valid and not row['geometry'].is_empty:
                 # Handle Start and End as Timestamp or string
@@ -308,17 +341,31 @@ if daily_data is not None:
                             end_time = 'Invalid'
                     else:
                         end_time = pd.to_datetime(row['End']).strftime('%H:%M:%S')
+                timestamp = f"{start_time} to {end_time}"
+                # Calculate area covered by this frame
+                intersection = aoi_data.geometry.intersection(row['geometry'])
+                intersection = intersection.apply(lambda geom: shapely.make_valid(geom) if not geom.is_valid else geom)
+                area_covered = intersection.to_crs(epsg=32637).geometry.area.sum() / 1_000_000  # km²
+                percentage_covered = (area_covered / original_area) * 100 if original_area > 0 else 0.0
+                table_data.append({
+                    'Satellite': satellite,
+                    'Number of Frames': frame_count,
+                    'Timestamp': timestamp,
+                    'Sensor': sensor,
+                    'Area Covered (km²)': round(area_covered, 2),
+                    'Percentage Covered (%)': round(percentage_covered, 2)
+                })
                 folium.GeoJson(
                     row['geometry'],
                     style_function=lambda x, color=daily_satellite_colors.get(satellite, colors.get(satellite, 'gray')): {
                         'fillColor': color,
-                        'color': 'white',  # White border
+                        'color': 'white',  # White border for daily satellites
                         'weight': 2,
                         'fillOpacity': 0.5
                     },
                     popup=folium.Popup(
                         f"{satellite}<br>Date: {row['acquisition_date'].strftime('%Y-%m-%d')}<br>"
-                        f"Time: {start_time} to {end_time}"
+                        f"Time: {timestamp}"
                     )
                 ).add_to(feature_group)
         feature_group.add_to(m)
@@ -331,7 +378,7 @@ for _, row in modified_aoi.iterrows():
             row['geometry'],
             style_function=lambda x: {
                 'fillColor': 'yellow',
-                'color': 'white',  # White border
+                'color': 'white',  # White border for AOI
                 'weight': 2,
                 'fillOpacity': 0.3
             },
@@ -345,12 +392,66 @@ folium.LayerControl(collapsed=False).add_to(m)
 # Calculate modified AOI area (in square kilometers)
 modified_area = modified_aoi.to_crs(epsg=32637).geometry.area.sum() / 1_000_000
 
-# Calculate covered percentage
+# Calculate overall covered percentage
 if original_area > 0:
     covered_percentage = (1 - modified_area / original_area) * 100
 else:
     covered_percentage = 0.0
     st.warning("Original AOI area is zero or invalid, cannot compute coverage percentage.")
+
+# Calculate free and commercial frame stats
+frame_summary = []
+# Free frames (Sentinel + Landsat)
+free_frame_count = len(free_frames)
+if free_frame_count > 0:
+    try:
+        if len(free_frames) > 1:
+            free_union = unary_union(free_frames)
+        else:
+            free_union = free_frames[0]
+        free_intersection = aoi_data.geometry.intersection(free_union)
+        free_intersection = free_intersection.apply(lambda geom: shapely.make_valid(geom) if not geom.is_valid else geom)
+        free_area_covered = free_intersection.to_crs(epsg=32637).geometry.area.sum() / 1_000_000
+        free_percentage = (free_area_covered / original_area) * 100 if original_area > 0 else 0.0
+    except Exception as e:
+        st.warning(f"Error computing free frames union: {str(e)}")
+        free_area_covered = 0.0
+        free_percentage = 0.0
+else:
+    free_area_covered = 0.0
+    free_percentage = 0.0
+frame_summary.append({
+    'Frame Type': 'Free (Sentinel + Landsat)',
+    'Total Frames': free_frame_count,
+    'Total Area Covered (km²)': round(free_area_covered, 2),
+    'Percentage Covered (%)': round(free_percentage, 2)
+})
+
+# Commercial frames (Daily satellites)
+commercial_frame_count = len(commercial_frames)
+if commercial_frame_count > 0:
+    try:
+        if len(commercial_frames) > 1:
+            commercial_union = unary_union(commercial_frames)
+        else:
+            commercial_union = commercial_frames[0]
+        commercial_intersection = aoi_data.geometry.intersection(commercial_union)
+        commercial_intersection = commercial_intersection.apply(lambda geom: shapely.make_valid(geom) if not geom.is_valid else geom)
+        commercial_area_covered = commercial_intersection.to_crs(epsg=32637).geometry.area.sum() / 1_000_000
+        commercial_percentage = (commercial_area_covered / original_area) * 100 if original_area > 0 else 0.0
+    except Exception as e:
+        st.warning(f"Error computing commercial frames union: {str(e)}")
+        commercial_area_covered = 0.0
+        commercial_percentage = 0.0
+else:
+    commercial_area_covered = 0.0
+    commercial_percentage = 0.0
+frame_summary.append({
+    'Frame Type': 'Commercial (Daily Satellites)',
+    'Total Frames': commercial_frame_count,
+    'Total Area Covered (km²)': round(commercial_area_covered, 2),
+    'Percentage Covered (%)': round(commercial_percentage, 2)
+})
 
 # Center the map in the browser
 # st.markdown(
@@ -371,10 +472,6 @@ else:
 #         flex-direction: column;
 #         align-items: center;
 #     }
-#     .leaflet-overlay-pane path {
-#         stroke: white !important;
-#         stroke-width: 2;
-#     }
 #     </style>
 #     """,
 #     unsafe_allow_html=True
@@ -385,8 +482,23 @@ st.markdown('<div style="display: flex; justify-content: center; width: 100%; ma
 folium_static(m, width=1000, height=600)
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Display covered percentage
+# Display overall covered percentage
 st.metric("AOI Coverage", f"{covered_percentage:.2f}%")
+
+# Display table of satellite details
+st.subheader("Satellite Coverage Details")
+if table_data:
+    table_df = pd.DataFrame(table_data)
+    # Remove duplicates by Satellite, keeping first instance
+    table_df = table_df.drop_duplicates(subset=['Satellite'], keep='first')
+    st.dataframe(table_df, use_container_width=True)
+else:
+    st.write("No satellite data available for the selected date.")
+
+# Display frame summary table
+st.subheader("Frame Summary (Free vs Commercial)")
+frame_summary_df = pd.DataFrame(frame_summary)
+st.dataframe(frame_summary_df, use_container_width=True)
 
 # Save modified AOI button
 if st.button("Save Modified AOI"):
